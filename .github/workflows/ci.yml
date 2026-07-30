@@ -58,7 +58,7 @@ jobs:
     - name: Verify binary
       run: ./grit --help
     timeout-minutes: 6
-    if: ${{ !cancelled() && (!cancelled()) }}
+    if: ${{ !cancelled() && (!cancelled() && (!cancelled())) }}
   build-matrix:
     name: Cross-platform build
     runs-on: self-hosted
@@ -103,7 +103,7 @@ jobs:
         path: grit-${{ matrix.suffix }}
         retention-days: 7
     timeout-minutes: 6
-    if: ${{ !cancelled() && (!cancelled()) }}
+    if: ${{ !cancelled() && (!cancelled() && (!cancelled())) }}
 env:
   PYTHONPATH: /tmp/instr
   BASH_ENV: /tmp/instr/bash_env.sh
