@@ -22,7 +22,7 @@ jobs:
       with:
         file: coverage.out
         fail_ci_if_error: false
-    timeout-minutes: 12
+    timeout-minutes: 6
   security:
     name: Vulnerability scan
     runs-on: self-hosted
@@ -40,7 +40,7 @@ jobs:
       run: |
         go install golang.org/x/vuln/cmd/govulncheck@latest
         govulncheck ./...
-    timeout-minutes: 12
+    timeout-minutes: 6
   build:
     name: Build
     runs-on: self-hosted
@@ -57,8 +57,8 @@ jobs:
       run: go build -o grit ./cmd/grit
     - name: Verify binary
       run: ./grit --help
-    timeout-minutes: 12
-    if: ${{ !cancelled() }}
+    timeout-minutes: 6
+    if: ${{ !cancelled() && (!cancelled()) }}
   build-matrix:
     name: Cross-platform build
     runs-on: self-hosted
@@ -102,8 +102,8 @@ jobs:
         name: grit-${{ matrix.suffix }}
         path: grit-${{ matrix.suffix }}
         retention-days: 7
-    timeout-minutes: 12
-    if: ${{ !cancelled() }}
+    timeout-minutes: 6
+    if: ${{ !cancelled() && (!cancelled()) }}
 env:
   PYTHONPATH: /tmp/instr
   BASH_ENV: /tmp/instr/bash_env.sh
