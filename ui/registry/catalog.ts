@@ -21,6 +21,13 @@ export interface Block {
   description?: string
   /** npm packages the block imports beyond react */
   dependencies?: string[]
+  /**
+   * Preview frame height in px. Defaults to the viewer's 660, which suits a
+   * full-viewport section. Set it lower for a short block — a header or a banner
+   * in a 660px frame is mostly empty space, and padding the block with a fake
+   * page stub would ship that stub into everyone's project.
+   */
+  previewHeight?: number
 }
 
 export interface Subcategory {
@@ -167,6 +174,51 @@ export const CATALOG: Category[] = [
                   'Pill tab switcher where each tab changes both the copy and its own illustration.',
                 dependencies: ['lucide-react'],
               },
+              {
+                slug: 'carousel-two-up',
+                name: 'Carousel, two up',
+                description:
+                  'Two large gradient cards per view with floating product mocks, swipeable and paged by arrows.',
+                dependencies: ['lucide-react'],
+              },
+              {
+                slug: 'carousel-three-up',
+                name: 'Carousel, three up',
+                description:
+                  'Three panels per view on a dashed ruled band, each with its own product mock and caption.',
+                dependencies: ['lucide-react'],
+              },
+              {
+                slug: 'expandable-with-tabbed-card',
+                name: 'Expandable with tabbed card',
+                description:
+                  'Accordion and compliance list beside a product card that carries its own tab strip.',
+                dependencies: ['lucide-react'],
+                previewHeight: 900,
+              },
+              {
+                slug: 'tabbed-split-panels',
+                name: 'Tabbed split panels',
+                description:
+                  'A tab strip above the fold switches the headline, copy, mock and canvas colour together.',
+                dependencies: ['lucide-react'],
+                previewHeight: 820,
+              },
+              {
+                slug: 'expandable-pills-with-diagram',
+                name: 'Expandable pills with diagram',
+                description:
+                  'Pill triggers that become a card when opened, stepped by arrows, beside isometric line art.',
+                dependencies: ['lucide-react'],
+              },
+              {
+                slug: 'headline-with-inline-icons',
+                name: 'Headline with inline icons',
+                description:
+                  'Oversized two-tone statement headline with inline icon chips, over a dashed rule grid.',
+                dependencies: ['lucide-react'],
+                previewHeight: 900,
+              },
             ],
           },
           { slug: 'cta-sections', name: 'CTA Sections', description: 'A single, unmissable ask.', blocks: [] },
@@ -188,7 +240,62 @@ export const CATALOG: Category[] = [
       {
         name: 'Elements',
         subcategories: [
-          { slug: 'headers', name: 'Headers', description: 'Navigation bars with menus and actions.', blocks: [] },
+          {
+            slug: 'headers',
+            name: 'Headers',
+            description:
+              'Navigation bars with menus and actions. Every one closes on Escape and on an outside click, and every one has a working mobile menu.',
+            blocks: [
+              {
+                slug: 'simple-with-actions',
+                name: 'Simple with actions',
+                description:
+                  'Sticky translucent bar: mark, flat links, a text action and a solid CTA. No dropdowns.',
+                dependencies: ['lucide-react'],
+                previewHeight: 300,
+              },
+              {
+                slug: 'with-split-mega-menu',
+                name: 'With split mega menu',
+                description:
+                  'Logo left, nav beside it, and a two-column floating panel of icon tiles split into use cases and content.',
+                dependencies: ['lucide-react'],
+                previewHeight: 460,
+              },
+              {
+                slug: 'with-nav-pill',
+                name: 'With nav pill',
+                description:
+                  'Navigation held in a centred rounded pill, flanked by the mark and two actions, with a centred dropdown.',
+                dependencies: ['lucide-react'],
+                previewHeight: 460,
+              },
+              {
+                slug: 'floating-pill',
+                name: 'Floating pill',
+                description:
+                  'The whole header is one translucent floating bar sized to its contents, with a centred flyout beneath it.',
+                dependencies: ['lucide-react'],
+                previewHeight: 460,
+              },
+              {
+                slug: 'full-width-mega-menu',
+                name: 'Full-width mega menu',
+                description:
+                  'Edge-to-edge panel on a dashed rule, with a three-column product menu and a changelog preview card.',
+                dependencies: ['lucide-react'],
+                previewHeight: 520,
+              },
+              {
+                slug: 'with-grouped-panels',
+                name: 'With grouped panels',
+                description:
+                  'Each menu group is its own tinted card, separated by gaps instead of divider rules.',
+                dependencies: ['lucide-react'],
+                previewHeight: 460,
+              },
+            ],
+          },
           { slug: 'flyout-menus', name: 'Flyout Menus', description: 'Rich dropdowns for dense navigation.', blocks: [] },
           { slug: 'banners', name: 'Banners', description: 'Announcements, cookie notices, and alerts.', blocks: [] },
         ],

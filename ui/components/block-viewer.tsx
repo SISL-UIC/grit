@@ -4,6 +4,7 @@ import { useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react'
 import { InstallCommand } from './install-command'
 import { trackBlockCopy } from '@/lib/track'
+import { InstallCount } from './install-count'
 import {
   Check,
   Code2,
@@ -96,9 +97,14 @@ export function BlockViewer({
   installCommand,
   category,
   subcategory,
-  blockSlug,
+  installs,
   height = 660,
 }: {
+  /**
+   * The registry name — flat and globally unique, e.g.
+   * "marketing-hero-sections-simple-centered". Also the identifier sent with
+   * copy events, because a bare block slug is only unique within a subcategory.
+   */
   name: string
   title: string
   source: string
@@ -107,7 +113,7 @@ export function BlockViewer({
   installCommand: string
   category: string
   subcategory: string
-  blockSlug: string
+  installs?: number
   height?: number
 }) {
   const [tab, setTab] = useState<Tab>('preview')
@@ -118,7 +124,10 @@ export function BlockViewer({
     <section className="scroll-mt-24" id={name}>
       {/* Toolbar */}
       <div className="mb-3.5 flex flex-wrap items-center gap-3">
-        <h3 className="display text-[15px] text-gray-900 dark:text-white">{title}</h3>
+        <div className="flex items-center gap-2.5">
+          <h3 className="display text-[15px] text-gray-900 dark:text-white">{title}</h3>
+          <InstallCount count={installs} />
+        </div>
 
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <Segmented
@@ -169,7 +178,7 @@ export function BlockViewer({
             value={source}
             label="Copy code"
             onCopied={() =>
-              trackBlockCopy({ block: blockSlug, category, subcategory, kind: 'code' })
+              trackBlockCopy({ block: name, category, subcategory, kind: 'code' })
             }
           />
         </div>
@@ -179,7 +188,7 @@ export function BlockViewer({
       <div className="mb-3">
         <InstallCommand
           command={installCommand}
-          block={blockSlug}
+          block={name}
           category={category}
           subcategory={subcategory}
         />
