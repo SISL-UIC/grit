@@ -1,5 +1,7 @@
 package scaffold
 
+import "strings"
+
 // adminFormBuilder returns the dynamic form builder component.
 func adminFormBuilder() string {
 	return `"use client";
@@ -669,11 +671,43 @@ export function FormPage({ resource }: FormPageProps) {
 func adminFormStepper() string {
 	return `"use client";
 
-import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useMemo, useState } from "react";
+import { useForm, useWatch } from "react-hook-form";
 import type { FieldDefinition, FormDefinition, StepDefinition } from "@/lib/resource";
 import { FieldRenderer, buildDefaults } from "./form-builder";
 import { Check, ChevronLeft, ChevronRight, Loader2 } from "@/lib/icons";
+
+/**
+ * Has this value changed from what is stored?
+ *
+ * Deliberately loose, because "unchanged" has several spellings by the time a
+ * value has been through a form control:
+ *
+ *   - A column that was never set arrives as null, undefined or "" depending on
+ *     the field type. Treating those as different from each other lights up the
+ *     Update button on a step nobody touched.
+ *   - A number input hands back the string "5" for a stored number 5.
+ *   - Relationship arrays and line-items are objects, so identity comparison
+ *     always reports a change.
+ *
+ * Getting this wrong in the permissive direction means a permanently-enabled
+ * Update button, which trains people to ignore it.
+ */
+function sameValue(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  const emptyA = a === "" || a === null || a === undefined;
+  const emptyB = b === "" || b === null || b === undefined;
+  if (emptyA && emptyB) return true;
+  if (emptyA !== emptyB) return false;
+  if (typeof a === "object" || typeof b === "object") {
+    try {
+      return JSON.stringify(a) === JSON.stringify(b);
+    } catch {
+      return false;
+    }
+  }
+  return String(a) === String(b);
+}
 
 interface ComputedStep {
   title: string;
@@ -709,6 +743,20 @@ interface FormStepperProps {
   onCancel: () => void;
   isSubmitting?: boolean;
   submitLabel?: string;
+  /**
+   * EDIT MODE ONLY. Persist just the fields belonging to one step.
+   *
+   * When supplied, every step gets its own Update button and the whole-form
+   * submit disappears — the point being that editing the address on step 3 must
+   * not rewrite the twenty fields on steps 1 and 2 with whatever the form
+   * happens to be holding.
+   *
+   * Must reject on failure. The stepper only clears the step's dirty state when
+   * this resolves, so a silent catch here would show a saved step that was not.
+   */
+  onStepSave?: (values: Record<string, unknown>) => Promise<unknown>;
+  /** Label for the last step's close button when onStepSave is in play. */
+  doneLabel?: string;
 }
 
 export function FormStepper({
@@ -718,6 +766,8 @@ export function FormStepper({
   onCancel,
   isSubmitting,
   submitLabel = "Save",
+  onStepSave,
+  doneLabel = "Done",
 }: FormStepperProps) {
   const [currentStep, setCurrentStep] = useState(0);
   const steps = computeSteps(formDef);
@@ -725,15 +775,61 @@ export function FormStepper({
   const isTwoColumn = formDef.layout === "two-column";
   const isLastStep = currentStep === steps.length - 1;
 
+  const initialValues = useMemo(
+    () => buildDefaults(formDef.fields, defaultValues),
+    // defaultValues is a fresh object on every render of the parent; keying off
+    // its identity would rebuild the baseline constantly and every step would
+    // read as clean forever.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [formDef.fields, JSON.stringify(defaultValues ?? {})]
+  );
+
   const {
     control,
     handleSubmit,
     trigger,
     getValues,
     formState: { errors },
-  } = useForm({
-    defaultValues: buildDefaults(formDef.fields, defaultValues),
-  });
+  } = useForm({ defaultValues: initialValues });
+
+  // What is currently persisted, per field. Advanced only when a step save
+  // actually succeeds, so a failed request leaves the step dirty and the button
+  // enabled to retry.
+  const [baseline, setBaseline] = useState<Record<string, unknown>>(initialValues);
+  const [savingStep, setSavingStep] = useState<number | null>(null);
+
+  const stepKeys = useMemo(
+    () => (steps[currentStep]?.fields ?? []).map((f) => f.key),
+    [steps, currentStep]
+  );
+
+  // Subscribing to just this step's fields, rather than watch()-ing everything,
+  // so typing in step 1 does not re-render step 4.
+  const watched = useWatch({ control, name: stepKeys as string[] });
+  const stepDirty =
+    !!onStepSave &&
+    stepKeys.some((key, i) => !sameValue((watched as unknown[])?.[i], baseline[key]));
+
+  const handleStepSave = async () => {
+    if (!onStepSave) return;
+    const valid = await trigger(stepKeys);
+    if (!valid) return;
+
+    const all = getValues() as Record<string, unknown>;
+    const patch: Record<string, unknown> = {};
+    for (const key of stepKeys) patch[key] = all[key];
+
+    setSavingStep(currentStep);
+    try {
+      await onStepSave(patch);
+      setBaseline((prev) => ({ ...prev, ...patch }));
+    } catch {
+      // The mutation already surfaced the error. Leave the baseline alone so
+      // the step stays dirty and the button stays live for another attempt.
+    } finally {
+      setSavingStep(null);
+    }
+  };
 
   const handleNext = async () => {
     const fieldKeys = steps[currentStep].fields.map((f) => f.key);
@@ -789,6 +885,9 @@ export function FormStepper({
           </div>
           <p className="text-xs text-text-muted mt-1.5">
             Step {currentStep + 1} of {steps.length}
+            {stepDirty && (
+              <span className="text-warning ml-2">Unsaved changes on this step</span>
+            )}
           </p>
         </div>
 
@@ -814,28 +913,64 @@ export function FormStepper({
               </button>
             )}
           </div>
-          <div>
-            {isLastStep ? (
+          {/* Editing an existing record saves step by step; creating a new one
+              still submits once at the end, because a half-created record has
+              nothing to PATCH against. */}
+          {onStepSave ? (
+            <div className="flex items-center gap-2">
               <button
                 type="button"
-                onClick={handleFinalSubmit}
-                disabled={isSubmitting}
-                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
+                onClick={handleStepSave}
+                disabled={!stepDirty || savingStep !== null}
+                title={stepDirty ? undefined : "No changes on this step"}
+                className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
-                {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
-                {submitLabel}
+                {savingStep === currentStep && <Loader2 className="h-4 w-4 animate-spin" />}
+                Update
               </button>
-            ) : (
-              <button
-                type="button"
-                onClick={handleNext}
-                className="flex items-center gap-1.5 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
-              >
-                Next
-                <ChevronRight className="h-4 w-4" />
-              </button>
-            )}
-          </div>
+              {isLastStep ? (
+                <button
+                  type="button"
+                  onClick={onCancel}
+                  className="rounded-lg border border-border px-5 py-2 text-sm font-medium text-text-secondary hover:bg-bg-hover transition-colors"
+                >
+                  {doneLabel}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  className="flex items-center gap-1.5 rounded-lg border border-border px-5 py-2 text-sm font-medium text-foreground hover:bg-bg-hover transition-colors"
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          ) : (
+            <div>
+              {isLastStep ? (
+                <button
+                  type="button"
+                  onClick={handleFinalSubmit}
+                  disabled={isSubmitting}
+                  className="flex items-center gap-2 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accent-hover disabled:opacity-50 transition-colors"
+                >
+                  {isSubmitting && <Loader2 className="h-4 w-4 animate-spin" />}
+                  {submitLabel}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  className="flex items-center gap-1.5 rounded-lg bg-accent px-5 py-2 text-sm font-medium text-white hover:bg-accent-hover transition-colors"
+                >
+                  Next
+                  <ChevronRight className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -1004,7 +1139,7 @@ func adminFormModalSteps() string {
 
 import type { ResourceDefinition } from "@/lib/resource";
 import { FormStepper } from "./form-stepper";
-import { useCreateResource, useUpdateResource } from "@/hooks/use-resource";
+import { useCreateResource, useUpdateResource, usePatchResource } from "@/hooks/use-resource";
 import { X } from "@/lib/icons";
 
 interface FormModalStepsProps {
@@ -1017,7 +1152,11 @@ export function FormModalSteps({ resource, item, onClose }: FormModalStepsProps)
   const isEdit = item !== null;
   const { mutate: create, isPending: isCreating } = useCreateResource(resource.endpoint, resource.label?.singular ?? resource.name);
   const { mutate: update, isPending: isUpdating } = useUpdateResource(resource.endpoint, resource.label?.singular ?? resource.name);
+  const { mutateAsync: patch } = usePatchResource(resource.endpoint, resource.label?.singular ?? resource.name);
   const isVertical = resource.form.stepVariant === "vertical";
+
+  // Per-step saving only makes sense against a record that already exists.
+  const perStepSave = isEdit && resource.form.perStepSave !== false;
 
   const handleSubmit = (data: Record<string, unknown>) => {
     if (isEdit) {
@@ -1054,6 +1193,12 @@ export function FormModalSteps({ resource, item, onClose }: FormModalStepsProps)
             onCancel={onClose}
             isSubmitting={isCreating || isUpdating}
             submitLabel={isEdit ? "Update" : "Create"}
+            onStepSave={
+              perStepSave && item
+                ? (values) => patch({ id: String(item.id), body: values })
+                : undefined
+            }
+            doneLabel="Close"
           />
         </div>
       </div>
@@ -1221,7 +1366,7 @@ func adminFormPageSteps() string {
 import { useRouter, useSearchParams } from "next/navigation";
 import type { ResourceDefinition } from "@/lib/resource";
 import { FormStepper } from "@/components/forms/form-stepper";
-import { useCreateResource, useUpdateResource, useResourceItem } from "@/hooks/use-resource";
+import { useCreateResource, useUpdateResource, usePatchResource, useResourceItem } from "@/hooks/use-resource";
 import { ChevronLeft } from "@/lib/icons";
 
 interface FormPageStepsProps {
@@ -1242,6 +1387,10 @@ export function FormPageSteps({ resource }: FormPageStepsProps) {
 
   const { mutate: create, isPending: isCreating } = useCreateResource(resource.endpoint, resource.label?.singular ?? resource.name);
   const { mutate: update, isPending: isUpdating } = useUpdateResource(resource.endpoint, resource.label?.singular ?? resource.name);
+  const { mutateAsync: patch } = usePatchResource(resource.endpoint, resource.label?.singular ?? resource.name);
+
+  // Per-step saving only makes sense against a record that already exists.
+  const perStepSave = isEdit && !!editId && resource.form.perStepSave !== false;
 
   const singularName = resource.label?.singular ?? resource.name;
   const pluralName = resource.label?.plural ?? resource.slug;
@@ -1310,6 +1459,12 @@ export function FormPageSteps({ resource }: FormPageStepsProps) {
           onCancel={() => router.back()}
           isSubmitting={isCreating || isUpdating}
           submitLabel={isEdit ? "Update" : "Create"}
+          onStepSave={
+            perStepSave && editId
+              ? (values) => patch({ id: editId, body: values })
+              : undefined
+          }
+          doneLabel="Back to list"
         />
       </div>
     </div>
@@ -1780,7 +1935,12 @@ export function SelectField({ field, value, onChange, error }: SelectFieldProps)
 
 // adminDateField returns the date picker field component.
 func adminDateField() string {
-	return `import type { FieldDefinition } from "@/lib/resource";
+	src := `"use client";
+
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { createPortal } from "react-dom";
+import type { FieldDefinition } from "@/lib/resource";
+import { Calendar, ChevronLeft, ChevronRight } from "@/lib/icons";
 
 interface DateFieldProps {
   field: FieldDefinition;
@@ -1789,8 +1949,344 @@ interface DateFieldProps {
   error?: string;
 }
 
+/* ─── Date maths, all local-time ──────────────────────────────────────────
+
+   Every helper below builds dates from year/month/day NUMBERS and formats
+   them by hand. Nothing here goes near new Date("2024-03-15").
+
+   That string form is parsed as UTC midnight, so anywhere west of Greenwich
+   it reads back as the 14th. A date of birth that shifts by a day depending
+   on the viewer's timezone is the kind of bug that surfaces months later in
+   a report nobody can reconcile.                                          */
+
+const MONTHS = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+];
+const WEEKDAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+
+const pad = (n: number) => String(n).padStart(2, "0");
+
+interface Parts {
+  year: number;
+  month: number; // 0-indexed, matching Date
+  day: number;
+  hour: number;
+  minute: number;
+}
+
+/** "2024-03-15" or "2024-03-15T14:30" → parts. Null when unparseable. */
+function parseValue(value: string): Parts | null {
+  if (!value) return null;
+  const [datePart, timePart = ""] = value.split("T");
+  const [y, m, d] = datePart.split("-").map(Number);
+  if (!y || !m || !d) return null;
+  const [hh = 0, mm = 0] = timePart.split(":").map(Number);
+  return { year: y, month: m - 1, day: d, hour: hh || 0, minute: mm || 0 };
+}
+
+/** Back to the exact string shape the API and the old native input used. */
+function formatValue(parts: Parts, withTime: boolean): string {
+  const date = ~${parts.year}-${pad(parts.month + 1)}-${pad(parts.day)}~;
+  return withTime ? ~${date}T${pad(parts.hour)}:${pad(parts.minute)}~ : date;
+}
+
+function todayParts(): Parts {
+  const now = new Date();
+  return {
+    year: now.getFullYear(),
+    month: now.getMonth(),
+    day: now.getDate(),
+    hour: now.getHours(),
+    minute: now.getMinutes(),
+  };
+}
+
+const daysInMonth = (year: number, month: number) => new Date(year, month + 1, 0).getDate();
+const firstWeekday = (year: number, month: number) => new Date(year, month, 1).getDay();
+
+/** Sortable yyyymmdd, so a range check never allocates a Date. */
+const ord = (y: number, m: number, d: number) => y * 10000 + (m + 1) * 100 + d;
+
+function ordOf(iso: string | undefined): number | null {
+  if (!iso) return null;
+  const p = parseValue(iso);
+  return p ? ord(p.year, p.month, p.day) : null;
+}
+
 export function DateField({ field, value, onChange, error }: DateFieldProps) {
-  const inputType = field.type === "datetime" ? "datetime-local" : "date";
+  const withTime = field.type === "datetime";
+  const selected = parseValue(value);
+  const today = todayParts();
+
+  const [open, setOpen] = useState(false);
+  // The month on screen, which is NOT the selection — you browse away from the
+  // selected date all the time without picking anything.
+  const [view, setView] = useState(() => ({
+    year: selected?.year ?? today.year,
+    month: selected?.month ?? today.month,
+  }));
+  const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
+
+  const minOrd = ordOf(field.minDate);
+  const maxOrd = ordOf(field.maxDate);
+
+  // Year list. Wide enough for a date of birth by default — reaching 1985
+  // through a native date input means holding an arrow key, which is the whole
+  // reason this component exists. minDate/maxDate narrow it when the field
+  // knows better.
+  const years = useMemo(() => {
+    const min = field.minDate ? parseValue(field.minDate)!.year : today.year - 100;
+    const max = field.maxDate ? parseValue(field.maxDate)!.year : today.year + 10;
+    const list: number[] = [];
+    for (let y = max; y >= min; y--) list.push(y);
+    // A stored value outside the configured window still has to appear, or
+    // opening the picker on an old record silently changes its year.
+    if (selected && !list.includes(selected.year)) {
+      list.push(selected.year);
+      list.sort((a, b) => b - a);
+    }
+    return list;
+  }, [field.minDate, field.maxDate, today.year, selected?.year]);
+
+  const place = useCallback(() => {
+    const el = triggerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const panelHeight = withTime ? 400 : 350;
+    // Flip above when there is no room below. Forms live inside scrolling
+    // modals, and a panel that opens off the bottom edge is the same as no
+    // panel at all.
+    const below = window.innerHeight - rect.bottom;
+    const top =
+      below < panelHeight && rect.top > panelHeight ? rect.top - panelHeight - 4 : rect.bottom + 4;
+    // Fixed width rather than the field's. A seven-column grid stretched across
+    // a full-width form field puts an inch of dead space between each number,
+    // which reads as a broken layout rather than a calendar.
+    const width = 320;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    setPos({ top, left, width });
+  }, [withTime]);
+
+  useEffect(() => {
+    if (!open) return;
+    place();
+    function onPointerDown(e: PointerEvent) {
+      const t = e.target as Node;
+      if (
+        triggerRef.current && !triggerRef.current.contains(t) &&
+        panelRef.current && !panelRef.current.contains(t)
+      ) {
+        setOpen(false);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      // Capture + stop, so closing the picker does not also close the modal
+      // the form is sitting in and throw away everything typed so far.
+      e.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+    }
+    function onScroll() { place(); }
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
+    };
+  }, [open, place]);
+
+  // Re-centre on the selection each time it opens, so browsing to 1990 and
+  // closing without picking does not strand the next visit there.
+  useEffect(() => {
+    if (!open) return;
+    setView({ year: selected?.year ?? today.year, month: selected?.month ?? today.month });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  function commit(day: number, from = view) {
+    const next: Parts = {
+      year: from.year,
+      month: from.month,
+      day,
+      // Keep the time that was already stored: picking a day should not
+      // silently reset an appointment to midnight.
+      hour: selected?.hour ?? 0,
+      minute: selected?.minute ?? 0,
+    };
+    onChange(formatValue(next, withTime));
+    // A datetime field still needs the time row, so it stays open.
+    if (!withTime) setOpen(false);
+  }
+
+  function setTime(hour: number, minute: number) {
+    const base = selected ?? { ...today, hour: 0, minute: 0 };
+    onChange(formatValue({ ...base, hour, minute }, true));
+  }
+
+  const shiftMonth = (delta: number) =>
+    setView((v) => {
+      const m = v.month + delta;
+      return { year: v.year + Math.floor(m / 12), month: ((m % 12) + 12) % 12 };
+    });
+
+  const isDisabled = (day: number) => {
+    const o = ord(view.year, view.month, day);
+    if (minOrd !== null && o < minOrd) return true;
+    if (maxOrd !== null && o > maxOrd) return true;
+    return false;
+  };
+
+  const label = selected
+    ? ~${MONTHS[selected.month]} ${selected.day}, ${selected.year}~ +
+      (withTime ? ~ · ${pad(selected.hour)}:${pad(selected.minute)}~ : "")
+    : "";
+
+  const leading = firstWeekday(view.year, view.month);
+  const total = daysInMonth(view.year, view.month);
+
+  const panel = open ? createPortal(
+    <div
+      ref={panelRef}
+      role="dialog"
+      aria-label={~Choose ${field.label}~}
+      className="fixed z-[9999] rounded-xl border border-border bg-bg-elevated p-3 shadow-2xl"
+      style={{ top: pos.top, left: pos.left, width: pos.width, backgroundColor: "var(--bg-elevated, #22222e)" }}
+    >
+      {/* Month and year are dropdowns, not just arrows. Clicking a chevron 480
+          times to reach a birth year is the problem this replaces. */}
+      <div className="flex items-center gap-1.5">
+        <button
+          type="button"
+          onClick={() => shiftMonth(-1)}
+          aria-label="Previous month"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-foreground"
+        >
+          <ChevronLeft className="h-4 w-4" />
+        </button>
+
+        <select
+          value={view.month}
+          onChange={(e) => setView((v) => ({ ...v, month: Number(e.target.value) }))}
+          aria-label="Month"
+          className="min-w-0 flex-1 rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-sm text-foreground outline-none focus:border-accent"
+          style={{ backgroundColor: "var(--bg-secondary, #111118)" }}
+        >
+          {MONTHS.map((m, i) => (
+            <option key={m} value={i}>{m}</option>
+          ))}
+        </select>
+
+        <select
+          value={view.year}
+          onChange={(e) => setView((v) => ({ ...v, year: Number(e.target.value) }))}
+          aria-label="Year"
+          className="w-[5.5rem] shrink-0 rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-sm text-foreground outline-none focus:border-accent"
+          style={{ backgroundColor: "var(--bg-secondary, #111118)" }}
+        >
+          {years.map((y) => (
+            <option key={y} value={y}>{y}</option>
+          ))}
+        </select>
+
+        <button
+          type="button"
+          onClick={() => shiftMonth(1)}
+          aria-label="Next month"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-text-secondary hover:bg-bg-hover hover:text-foreground"
+        >
+          <ChevronRight className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="mt-3 grid grid-cols-7 gap-0.5">
+        {WEEKDAYS.map((w) => (
+          <div key={w} className="py-1 text-center text-[11px] font-medium text-text-muted">
+            {w}
+          </div>
+        ))}
+
+        {Array.from({ length: leading }).map((_, i) => (
+          <div key={"pad" + i} />
+        ))}
+
+        {Array.from({ length: total }).map((_, i) => {
+          const day = i + 1;
+          const isSelected =
+            !!selected && selected.year === view.year && selected.month === view.month && selected.day === day;
+          const isToday =
+            today.year === view.year && today.month === view.month && today.day === day;
+          const off = isDisabled(day);
+          return (
+            <button
+              key={day}
+              type="button"
+              disabled={off}
+              onClick={() => commit(day)}
+              aria-current={isSelected ? "date" : undefined}
+              className={
+                "flex h-9 items-center justify-center rounded-lg text-sm transition-colors " +
+                (isSelected
+                  ? "bg-accent font-semibold text-white"
+                  : off
+                    ? "cursor-not-allowed text-text-muted opacity-40"
+                    : isToday
+                      ? "text-foreground ring-1 ring-accent/60 hover:bg-bg-hover"
+                      : "text-foreground hover:bg-bg-hover")
+              }
+            >
+              {day}
+            </button>
+          );
+        })}
+      </div>
+
+      {withTime && (
+        <div className="mt-3 flex items-center gap-2 border-t border-border pt-3">
+          <label className="text-xs text-text-secondary">Time</label>
+          <input
+            type="time"
+            value={selected ? ~${pad(selected.hour)}:${pad(selected.minute)}~ : ""}
+            onChange={(e) => {
+              const [h, m] = e.target.value.split(":").map(Number);
+              if (!Number.isNaN(h) && !Number.isNaN(m)) setTime(h, m);
+            }}
+            className="flex-1 rounded-lg border border-border bg-bg-secondary px-2 py-1.5 text-sm text-foreground outline-none focus:border-accent"
+            style={{ backgroundColor: "var(--bg-secondary, #111118)" }}
+          />
+        </div>
+      )}
+
+      <div className="mt-3 flex items-center justify-between border-t border-border pt-3">
+        <button
+          type="button"
+          onClick={() => {
+            const t = todayParts();
+            setView({ year: t.year, month: t.month });
+            commit(t.day, { year: t.year, month: t.month });
+          }}
+          className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-accent hover:bg-bg-hover"
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => { onChange(""); setOpen(false); }}
+          className="rounded-lg px-2.5 py-1.5 text-xs font-medium text-text-secondary hover:bg-bg-hover hover:text-foreground"
+        >
+          Clear
+        </button>
+      </div>
+    </div>,
+    document.body
+  ) : null;
 
   return (
     <div className="space-y-1.5">
@@ -1798,12 +2294,26 @@ export function DateField({ field, value, onChange, error }: DateFieldProps) {
         {field.label}
         {field.required && <span className="text-danger ml-1">*</span>}
       </label>
-      <input
-        type={inputType}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className={` + "`" + `w-full rounded-lg border border-border bg-bg-tertiary px-4 py-2.5 text-sm text-foreground focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent ${error ? "border-danger" : ""}` + "`" + `}
-      />
+
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => { if (!open) place(); setOpen(!open); }}
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        className={
+          "flex w-full items-center justify-between rounded-lg border bg-bg-tertiary px-4 py-2.5 text-sm transition-colors focus:outline-none focus:ring-1 focus:ring-accent " +
+          (error ? "border-danger " : "border-border ") +
+          (open ? "border-accent " : "") +
+          (selected ? "text-foreground" : "text-text-secondary")
+        }
+      >
+        <span>{selected ? label : field.placeholder || "Select a date..."}</span>
+        <Calendar className="h-4 w-4 shrink-0 opacity-60" />
+      </button>
+
+      {panel}
+
       {field.description && !error && (
         <p className="text-xs text-text-muted">{field.description}</p>
       )}
@@ -1812,6 +2322,7 @@ export function DateField({ field, value, onChange, error }: DateFieldProps) {
   );
 }
 `
+	return strings.ReplaceAll(src, "~", "`")
 }
 
 // adminToggleField returns the toggle/switch field component.
@@ -1909,6 +2420,14 @@ export function CheckboxField({ field, value, onChange, error }: CheckboxFieldPr
 func adminRadioField() string {
 	return `import type { FieldDefinition } from "@/lib/resource";
 
+/* Alpha-blended accent, computed at render time rather than with Tailwind's
+   /opacity syntax. The themes set --accent to a hex, and Tailwind v3 cannot
+   inject an alpha channel into a bare var() — bg-accent/10 and text-accent/80
+   both compile away to nothing. color-mix works against any colour form and
+   follows whichever theme is active, light or dark. */
+const SOFT_ACCENT = "color-mix(in srgb, var(--accent) 10%, transparent)";
+const MUTED_ACCENT = "color-mix(in srgb, var(--accent) 85%, transparent)";
+
 interface RadioFieldProps {
   field: FieldDefinition;
   value: string;
@@ -1923,7 +2442,18 @@ export function RadioField({ field, value, onChange, error }: RadioFieldProps) {
         {field.label}
         {field.required && <span className="text-danger ml-1">*</span>}
       </label>
-      <div className="space-y-2">
+      {/* One bordered list, rows divided by hairlines — not a stack of separate
+          cards. A gap between options makes each one read as its own control;
+          a single divided list reads as one choice with several answers, which
+          is what a radio group is. */}
+      <div
+        role="radiogroup"
+        aria-label={field.label}
+        className={
+          "divide-y divide-border overflow-hidden rounded-xl border " +
+          (error ? "border-danger" : "border-border")
+        }
+      >
         {field.options?.map((opt) => {
           const selected = value === opt.value;
           return (
@@ -1933,19 +2463,52 @@ export function RadioField({ field, value, onChange, error }: RadioFieldProps) {
               role="radio"
               aria-checked={selected}
               onClick={() => onChange(opt.value)}
+              // The tint is an inline color-mix, NOT bg-accent/10.
+              //
+              // The themes declare --accent as a hex, and Tailwind cannot inject
+              // an alpha channel into a bare var() — the /10 utility compiles to
+              // nothing and the row renders fully transparent. That failure is
+              // invisible in a screenshot, because the border and the radio dot
+              // still read as "selected"; it only shows up in the computed style.
+              style={selected ? { backgroundColor: SOFT_ACCENT } : undefined}
               className={
-                "flex w-full items-center justify-between gap-3 rounded-xl border p-4 text-left transition-colors " +
-                (selected ? "border-accent bg-accent/5" : "border-border hover:border-accent/40")
+                "flex w-full items-start gap-3 p-4 text-left transition-colors " +
+                (selected ? "" : "hover:bg-bg-hover")
               }
             >
-              <span className="min-w-0">
-                <span className="block text-sm font-medium text-foreground">{opt.label}</span>
+              <span
+                className={
+                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors " +
+                  (selected ? "border-accent" : "border-border")
+                }
+              >
+                {selected && <span className="size-2 rounded-full bg-accent" />}
+              </span>
+
+              <span className="min-w-0 flex-1">
+                <span
+                  className={
+                    "block text-sm font-semibold " + (selected ? "text-accent" : "text-foreground")
+                  }
+                >
+                  {opt.label}
+                </span>
                 {opt.description && (
-                  <span className="mt-0.5 block text-xs text-text-muted">{opt.description}</span>
+                  <span
+                    style={selected ? { color: MUTED_ACCENT } : undefined}
+                    className={"mt-0.5 block text-xs " + (selected ? "" : "text-text-muted")}
+                  >
+                    {opt.description}
+                  </span>
                 )}
               </span>
+
               {opt.hint && (
-                <span className={"shrink-0 text-sm font-medium " + (selected ? "text-accent" : "text-text-muted")}>
+                <span
+                  className={
+                    "shrink-0 text-sm font-medium " + (selected ? "text-accent" : "text-text-muted")
+                  }
+                >
                   {opt.hint}
                 </span>
               )}
@@ -1968,6 +2531,14 @@ export function RadioField({ field, value, onChange, error }: RadioFieldProps) {
 func adminCheckboxGroupField() string {
 	return `import type { FieldDefinition } from "@/lib/resource";
 
+/* Alpha-blended accent, computed at render time rather than with Tailwind's
+   /opacity syntax. The themes set --accent to a hex, and Tailwind v3 cannot
+   inject an alpha channel into a bare var() — bg-accent/10 and text-accent/80
+   both compile away to nothing. color-mix works against any colour form and
+   follows whichever theme is active, light or dark. */
+const SOFT_ACCENT = "color-mix(in srgb, var(--accent) 10%, transparent)";
+const MUTED_ACCENT = "color-mix(in srgb, var(--accent) 85%, transparent)";
+
 interface CheckboxGroupFieldProps {
   field: FieldDefinition;
   value: string[];
@@ -1989,7 +2560,16 @@ export function CheckboxGroupField({ field, value, onChange, error }: CheckboxGr
         {field.label}
         {field.required && <span className="text-danger ml-1">*</span>}
       </label>
-      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      {/* Same divided list as the radio group, so a form mixing the two reads
+          as one design rather than two. Single column even when the options are
+          short: descriptions wrap, and a two-column grid of unequal-height
+          cards leaves ragged holes down the form. */}
+      <div
+        className={
+          "divide-y divide-border overflow-hidden rounded-xl border " +
+          (error ? "border-danger" : "border-border")
+        }
+      >
         {field.options?.map((opt) => {
           const checked = value.includes(opt.value);
           return (
@@ -1999,24 +2579,53 @@ export function CheckboxGroupField({ field, value, onChange, error }: CheckboxGr
               role="checkbox"
               aria-checked={checked}
               onClick={() => toggle(opt.value)}
+              // Inline color-mix rather than bg-accent/10 — see SOFT_ACCENT.
+              style={checked ? { backgroundColor: SOFT_ACCENT } : undefined}
               className={
-                "flex items-center gap-3 rounded-xl border p-3 text-left transition-colors " +
-                (checked ? "border-accent bg-accent/5" : "border-border hover:border-accent/40")
+                "flex w-full items-start gap-3 p-4 text-left transition-colors " +
+                (checked ? "" : "hover:bg-bg-hover")
               }
             >
               <span
                 className={
-                  "flex h-4 w-4 shrink-0 items-center justify-center rounded border " +
+                  "mt-0.5 flex size-4 shrink-0 items-center justify-center rounded border-2 transition-colors " +
                   (checked ? "border-accent bg-accent text-white" : "border-border")
                 }
               >
                 {checked && (
-                  <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2">
+                  <svg viewBox="0 0 12 12" className="h-3 w-3" fill="none" stroke="currentColor" strokeWidth="2.5">
                     <path d="M2.5 6.5L5 9l4.5-5" strokeLinecap="round" strokeLinejoin="round" />
                   </svg>
                 )}
               </span>
-              <span className="text-sm text-foreground">{opt.label}</span>
+
+              <span className="min-w-0 flex-1">
+                <span
+                  className={
+                    "block text-sm font-semibold " + (checked ? "text-accent" : "text-foreground")
+                  }
+                >
+                  {opt.label}
+                </span>
+                {opt.description && (
+                  <span
+                    style={checked ? { color: MUTED_ACCENT } : undefined}
+                    className={"mt-0.5 block text-xs " + (checked ? "" : "text-text-muted")}
+                  >
+                    {opt.description}
+                  </span>
+                )}
+              </span>
+
+              {opt.hint && (
+                <span
+                  className={
+                    "shrink-0 text-sm font-medium " + (checked ? "text-accent" : "text-text-muted")
+                  }
+                >
+                  {opt.hint}
+                </span>
+              )}
             </button>
           );
         })}
@@ -2619,13 +3228,23 @@ export function FilesField({ field, value, onChange, error }: FilesFieldProps) {
 }
 
 func adminRelationshipSelectField() string {
-	return `"use client";
+	src := `"use client";
 
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { getResourceByEndpoint } from "@/resources";
+import { usePermissions } from "@/hooks/use-permissions";
 import type { FieldDefinition } from "@/lib/resource";
+import { Plus } from "@/lib/icons";
+
+// Lazy on purpose — see the note on adminInlineCreateDialog. A static import
+// here closes a cycle back through form-builder and the nested form silently
+// renders as nothing.
+const InlineCreateDialog = lazy(() =>
+  import("./inline-create-dialog").then((m) => ({ default: m.InlineCreateDialog }))
+);
 
 interface RelationshipSelectFieldProps {
   field: FieldDefinition;
@@ -2637,6 +3256,11 @@ interface RelationshipSelectFieldProps {
 export function RelationshipSelectField({ field, value, onChange, error }: RelationshipSelectFieldProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [creating, setCreating] = useState(false);
+  // The record just created inline. Held locally so its label shows the instant
+  // it is selected: the options query is refetching at that moment, and without
+  // this the field displays a raw UUID until the network settles.
+  const [justCreated, setJustCreated] = useState<Record<string, unknown> | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
@@ -2680,21 +3304,56 @@ export function RelationshipSelectField({ field, value, onChange, error }: Relat
 
   const displayField = field.displayField || "name";
 
+  // Options plus anything created inline that the refetch has not returned yet.
+  const allOptions = useMemo(() => {
+    const list = options as Record<string, unknown>[];
+    if (!justCreated) return list;
+    const id = String(justCreated.id ?? "");
+    if (!id || list.some((o) => String(o.id) === id)) return list;
+    return [justCreated, ...list];
+  }, [options, justCreated]);
+
+  // The related resource, looked up by the endpoint the field already points
+  // at. Undefined when the related model has no registered admin resource — in
+  // which case there is no form to open and the button must not appear.
+  const relatedResource = useMemo(
+    () => (field.relatedEndpoint ? getResourceByEndpoint(field.relatedEndpoint) : undefined),
+    [field.relatedEndpoint]
+  );
+
+  // can() is false while permissions load, which is the right default here:
+  // a button that appears and then vanishes reads as a bug, and this one opens
+  // a form the API would reject anyway.
+  const { can } = usePermissions();
+  const canCreate =
+    field.allowCreate !== false && !!relatedResource && can(relatedResource.slug + ".create");
+
+  // Carry the typed search into the new record, but only when the related form
+  // actually has that field. Guessing at the first field instead would drop the
+  // text into whatever happens to be declared first.
+  const prefill = useMemo(() => {
+    const typed = search.trim();
+    if (!typed || !relatedResource) return undefined;
+    return relatedResource.form.fields.some((f) => f.key === displayField)
+      ? { [displayField]: typed }
+      : undefined;
+  }, [search, relatedResource, displayField]);
+
   const filtered = useMemo(() =>
-    (options as Record<string, unknown>[]).filter((item) => {
+    allOptions.filter((item) => {
       if (!search) return true;
       const label = String(item[displayField] || item.name || item.title || item.id || "");
       return label.toLowerCase().includes(search.toLowerCase());
     }),
-    [options, search, displayField]
+    [allOptions, search, displayField]
   );
 
   const selectedLabel = useMemo(() => {
     if (!value) return "";
-    const found = (options as Record<string, unknown>[]).find((item) => item.id === value);
+    const found = allOptions.find((item) => String(item.id) === String(value));
     if (!found) return String(value);
     return String(found[displayField] || found.name || found.title || found.id || "");
-  }, [value, options, displayField]);
+  }, [value, allOptions, displayField]);
 
   const dropdown = open ? createPortal(
     <div
@@ -2747,6 +3406,26 @@ export function RelationshipSelectField({ field, value, onChange, error }: Relat
           </>
         )}
       </div>
+
+      {/* Deliberately OUTSIDE the empty/loading branch above. "No results
+          found" is exactly the moment someone needs to create the record, and
+          nesting this inside the populated branch would hide it precisely
+          then. */}
+      {canCreate && relatedResource && (
+        <div className="border-t border-border p-1">
+          <button
+            type="button"
+            onClick={() => { setOpen(false); setCreating(true); }}
+            className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-sm font-medium text-accent hover:bg-bg-hover"
+          >
+            <Plus className="h-4 w-4 shrink-0" />
+            <span className="truncate">
+              New {relatedResource.label?.singular ?? field.label}
+              {search.trim() ? ' “' + search.trim() + '”' : ""}
+            </span>
+          </button>
+        </div>
+      )}
     </div>,
     document.body
   ) : null;
@@ -2770,20 +3449,48 @@ export function RelationshipSelectField({ field, value, onChange, error }: Relat
       </button>
       {dropdown}
       {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+
+      {creating && relatedResource && (
+        <Suspense fallback={null}>
+          <InlineCreateDialog
+            resource={relatedResource}
+            defaults={prefill}
+            onCreated={(record) => {
+              const id = record?.id;
+              if (id !== undefined && id !== null) {
+                setJustCreated(record);
+                onChange(String(id));
+              }
+              setCreating(false);
+              setSearch("");
+            }}
+            onClose={() => setCreating(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
 `
+	return src
 }
 
 func adminMultiRelationshipSelectField() string {
-	return `"use client";
+	src := `"use client";
 
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { useState, useRef, useEffect, useMemo, useCallback, lazy, Suspense } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { getResourceByEndpoint } from "@/resources";
+import { usePermissions } from "@/hooks/use-permissions";
 import type { FieldDefinition } from "@/lib/resource";
+import { Plus } from "@/lib/icons";
+
+// Lazy for the same reason as the single select — see adminInlineCreateDialog.
+const InlineCreateDialog = lazy(() =>
+  import("./inline-create-dialog").then((m) => ({ default: m.InlineCreateDialog }))
+);
 
 interface MultiRelationshipSelectFieldProps {
   field: FieldDefinition;
@@ -2795,6 +3502,10 @@ interface MultiRelationshipSelectFieldProps {
 export function MultiRelationshipSelectField({ field, value = [], onChange, error }: MultiRelationshipSelectFieldProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [creating, setCreating] = useState(false);
+  // Records created inline, kept until the refetch returns them — otherwise a
+  // freshly added tag shows as a raw UUID chip for as long as the request takes.
+  const [justCreated, setJustCreated] = useState<Record<string, unknown>[]>([]);
   const triggerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ top: 0, left: 0, width: 0 });
@@ -2838,22 +3549,55 @@ export function MultiRelationshipSelectField({ field, value = [], onChange, erro
 
   const displayField = field.displayField || "name";
 
+  // Options plus anything created inline that the refetch has not returned yet.
+  const allOptions = useMemo(() => {
+    const list = options as Record<string, unknown>[];
+    if (justCreated.length === 0) return list;
+    const known = new Set(list.map((o) => String(o.id)));
+    const extra = justCreated.filter((r) => !known.has(String(r.id ?? "")));
+    return extra.length > 0 ? [...extra, ...list] : list;
+  }, [options, justCreated]);
+
+  // The related resource, looked up by the endpoint the field already points
+  // at. Undefined when the related model has no registered admin resource — in
+  // which case there is no form to open and the button must not appear.
+  const relatedResource = useMemo(
+    () => (field.relatedEndpoint ? getResourceByEndpoint(field.relatedEndpoint) : undefined),
+    [field.relatedEndpoint]
+  );
+
+  // can() is false while permissions load, which is the right default here: a
+  // button that appears and then vanishes reads as a bug.
+  const { can } = usePermissions();
+  const canCreate =
+    field.allowCreate !== false && !!relatedResource && can(relatedResource.slug + ".create");
+
+  // Carry the typed search into the new record, but only when the related form
+  // actually declares that field.
+  const prefill = useMemo(() => {
+    const typed = search.trim();
+    if (!typed || !relatedResource) return undefined;
+    return relatedResource.form.fields.some((f) => f.key === displayField)
+      ? { [displayField]: typed }
+      : undefined;
+  }, [search, relatedResource, displayField]);
+
   const filtered = useMemo(() =>
-    (options as Record<string, unknown>[]).filter((item) => {
+    allOptions.filter((item) => {
       if (!search) return true;
       const label = String(item[displayField] || item.name || item.title || item.id || "");
       return label.toLowerCase().includes(search.toLowerCase());
     }),
-    [options, search, displayField]
+    [allOptions, search, displayField]
   );
 
   const selectedLabels = useMemo(() => {
     return value.map((id) => {
-      const found = (options as Record<string, unknown>[]).find((item) => item.id === id);
+      const found = allOptions.find((item) => String(item.id) === String(id));
       if (!found) return { id, label: String(id) };
       return { id, label: String(found[displayField] || found.name || found.title || found.id || "") };
     });
-  }, [value, options, displayField]);
+  }, [value, allOptions, displayField]);
 
   const toggleItem = (id: string) => {
     if (value.includes(id)) {
@@ -2927,6 +3671,24 @@ export function MultiRelationshipSelectField({ field, value = [], onChange, erro
           </>
         )}
       </div>
+
+      {/* Outside the empty branch on purpose: "No results found" is exactly
+          when someone needs to create the record. */}
+      {canCreate && relatedResource && (
+        <div className="border-t border-border p-1">
+          <button
+            type="button"
+            onClick={() => { setOpen(false); setCreating(true); }}
+            className="flex w-full items-center gap-2 rounded-sm px-3 py-2 text-sm font-medium text-accent hover:bg-bg-hover"
+          >
+            <Plus className="h-4 w-4 shrink-0" />
+            <span className="truncate">
+              New {relatedResource.label?.singular ?? field.label}
+              {search.trim() ? ' “' + search.trim() + '”' : ""}
+            </span>
+          </button>
+        </div>
+      )}
     </div>,
     document.body
   ) : null;
@@ -2966,10 +3728,34 @@ export function MultiRelationshipSelectField({ field, value = [], onChange, erro
       </div>
       {dropdown}
       {error && <p className="mt-1 text-xs text-red-500">{error}</p>}
+
+      {creating && relatedResource && (
+        <Suspense fallback={null}>
+          <InlineCreateDialog
+            resource={relatedResource}
+            defaults={prefill}
+            onCreated={(record) => {
+              const id = record?.id;
+              if (id !== undefined && id !== null) {
+                setJustCreated((prev) => [record, ...prev]);
+                // Append rather than replace: this select holds a list, and the
+                // whole point of creating inline is to add to what is already
+                // picked.
+                const next = String(id);
+                if (!value.includes(next)) onChange([...value, next]);
+              }
+              setCreating(false);
+              setSearch("");
+            }}
+            onClose={() => setCreating(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
 `
+	return src
 }
 
 // adminRichTextField returns the Tiptap rich text editor field component.
@@ -3196,4 +3982,135 @@ function ToolbarButton({ onClick, active, disabled, title, children }: ToolbarBu
   );
 }
 `
+}
+
+// adminInlineCreateDialog emits components/forms/fields/inline-create-dialog.tsx.
+//
+// The nested "create the related record without leaving this form" dialog that
+// a relationship select opens. Given the related ResourceDefinition it renders
+// that resource's OWN form — stepper included when the resource declares steps
+// — so a multi-step Category form opens as a multi-step form here too, with no
+// second definition to keep in sync.
+//
+// IMPORTANT — this module is loaded lazily by the relationship selects, and it
+// has to stay that way. The static graph is:
+//
+//	form-builder → relationship-select-field → (lazy) inline-create-dialog → form-builder
+//
+// A plain import closes that circle. ES modules tolerate cycles, but React
+// components resolved mid-cycle arrive as undefined and the form renders as a
+// blank panel with no error worth reading. React.lazy defers the resolution to
+// first click, which breaks the cycle at module-eval time and code-splits the
+// dialog out of the initial bundle as a bonus.
+func adminInlineCreateDialog() string {
+	src := `"use client";
+
+import { useEffect } from "react";
+import { createPortal } from "react-dom";
+import type { ResourceDefinition } from "@/lib/resource";
+import { FormBuilder } from "../form-builder";
+import { FormStepper } from "../form-stepper";
+import { useCreateResource } from "@/hooks/use-resource";
+import { X } from "@/lib/icons";
+
+interface InlineCreateDialogProps {
+  resource: ResourceDefinition;
+  /** Pre-filled values — typically the text already typed into the select's search box. */
+  defaults?: Record<string, unknown>;
+  /** Receives the created record, so the caller can select it immediately. */
+  onCreated: (record: Record<string, unknown>) => void;
+  onClose: () => void;
+}
+
+export function InlineCreateDialog({ resource, defaults, onCreated, onClose }: InlineCreateDialogProps) {
+  const label = resource.label?.singular ?? resource.name;
+  const { mutate: create, isPending } = useCreateResource(resource.endpoint, label);
+
+  // Stepped when the resource says so, by either route the stepper supports.
+  const isStepped =
+    (resource.form.steps?.length ?? 0) > 0 || (resource.form.fieldsPerStep ?? 0) > 0;
+  const isVertical = resource.form.stepVariant === "vertical";
+
+  // Escape closes THIS dialog and stops there. Capture phase plus
+  // stopPropagation, because the form underneath is usually itself a modal
+  // listening for Escape — without this, one key press closes both and throws
+  // away everything typed into the parent form.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== "Escape") return;
+      e.stopPropagation();
+      onClose();
+    }
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, [onClose]);
+
+  const handleSubmit = (values: Record<string, unknown>) => {
+    create(values, {
+      onSuccess: (res) => {
+        // The API answers { data, message }; tolerate a bare record too, so a
+        // hand-written endpoint that returns the row directly still works.
+        const payload = res as { data?: Record<string, unknown> } | Record<string, unknown>;
+        const record =
+          (payload as { data?: Record<string, unknown> })?.data ??
+          (payload as Record<string, unknown>);
+        onCreated(record ?? {});
+      },
+    });
+  };
+
+  const width = isStepped ? (isVertical ? "max-w-4xl" : "max-w-2xl") : "max-w-md";
+
+  return createPortal(
+    // Above everything: the parent form modal sits at z-50 and the select's own
+    // dropdown portal at z-[9999]. A nested dialog that renders behind the form
+    // that opened it is the whole feature failing in the most confusing way.
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
+      <div className={~relative z-10 w-full ${width} max-h-[90vh] overflow-y-auto rounded-2xl border border-border bg-bg-secondary shadow-2xl~}>
+        <div className="flex items-center justify-between border-b border-border px-6 py-4">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">New {label}</h2>
+            <p className="text-xs text-text-secondary mt-0.5">
+              It will be selected when you save.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="rounded-lg p-1 text-text-secondary hover:bg-bg-hover hover:text-foreground transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        <div className="p-6">
+          {isStepped ? (
+            <FormStepper
+              form={resource.form}
+              defaultValues={defaults}
+              onSubmit={handleSubmit}
+              onCancel={onClose}
+              isSubmitting={isPending}
+              submitLabel={~Create ${label}~}
+            />
+          ) : (
+            <FormBuilder
+              form={resource.form}
+              defaultValues={defaults}
+              onSubmit={handleSubmit}
+              onCancel={onClose}
+              isSubmitting={isPending}
+              submitLabel={~Create ${label}~}
+            />
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+`
+	return strings.ReplaceAll(src, "~", "`")
 }

@@ -28,6 +28,101 @@ export default function ChangelogPage() {
               </p>
             </div>
 
+            {/* v3.114.0 */}
+            <div className="mb-12">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center rounded-lg bg-accent/15 px-3 py-1 text-sm font-semibold text-primary">
+                  v3.114.0
+                </span>
+                <span className="text-sm text-muted-foreground">July 31, 2026</span>
+              </div>
+
+              <div className="prose-grit">
+                <p>
+                  <strong>A real date picker, and radio/checkbox groups that read as
+                  one choice.</strong>
+                </p>
+                <ul>
+                  <li>
+                    <strong>Date and datetime fields get a proper picker.</strong> The
+                    native <code>mm/dd/yyyy</code> input is replaced with a calendar whose
+                    header carries a <strong>month dropdown and a year dropdown</strong> —
+                    so a date of birth in 1985 is two selections and a click, instead of
+                    holding an arrow key. The year list runs 100 years back to 10 forward
+                    by default; new <code>minDate</code> / <code>maxDate</code> field
+                    options narrow it and grey out days outside the range. Datetime fields
+                    keep a time row, and picking a day no longer resets the time to
+                    midnight. The panel is portalled, flips above the field when there is
+                    no room below, and closes on Escape without also closing the form
+                    modal around it.
+                  </li>
+                  <li>
+                    <strong>Radio and checkbox groups render as one divided list.</strong>
+                    Options now sit in a single bordered container split by hairlines,
+                    each row carrying its control, a bold label and an optional
+                    description, with the selected row tinted and its text in the accent
+                    colour. Previously they were separate cards floating in a gap, which
+                    reads as several independent controls rather than one question with
+                    several answers.
+                  </li>
+                  <li>
+                    <strong>Fixed: accent tints that silently rendered as nothing.</strong>
+                    The themes declare <code>--accent</code> as a hex, and Tailwind cannot
+                    inject an alpha channel into a bare <code>var()</code> — so{' '}
+                    <code>bg-accent/10</code> and <code>text-accent/80</code> compiled away
+                    entirely. The selected row had no fill at all. These now use{' '}
+                    <code>color-mix</code>, which follows whichever theme is active.
+                  </li>
+                </ul>
+              </div>
+            </div>
+
+            {/* v3.113.0 */}
+            <div className="mb-12">
+              <div className="flex items-center gap-3 mb-4">
+                <span className="inline-flex items-center rounded-lg bg-accent/15 px-3 py-1 text-sm font-semibold text-primary">
+                  v3.113.0
+                </span>
+                <span className="text-sm text-muted-foreground">July 30, 2026</span>
+              </div>
+
+              <div className="prose-grit">
+                <p>
+                  <strong>Create a related record without leaving the form, and save a
+                  multi-step form one step at a time.</strong>
+                </p>
+                <ul>
+                  <li>
+                    <strong>Inline create from a relationship dropdown.</strong> Open the
+                    Category select on a Product form and the list now ends in a{' '}
+                    <em>New Category</em> row. It opens the Category resource&rsquo;s own
+                    form in a nested dialog &mdash; stepper included, if Category declares
+                    steps &mdash; and the record you create becomes the selected value.
+                    Anything typed into the search box is carried into the new record, and
+                    the label appears immediately rather than flashing a raw UUID while the
+                    options refetch. The row only appears when the related model is a
+                    registered resource and you hold <code>&lt;slug&gt;.create</code>; set{' '}
+                    <code>allowCreate: false</code> on the field to hide it. Works the same
+                    way on many-to-many selects, where it appends to the selection.
+                  </li>
+                  <li>
+                    <strong>Per-step Update on multi-step edit forms.</strong> Editing a
+                    record through a stepped form gives every step its own Update button.
+                    It is disabled until you change something on that step, saves only that
+                    step&rsquo;s fields with <code>PATCH</code>, and goes back to disabled
+                    once it lands. Editing the address on step 3 no longer rewrites the
+                    twenty fields on steps 1 and 2 with whatever the form happened to be
+                    holding. A failed save leaves the step dirty so you can retry rather
+                    than showing a step that was never persisted. Applies to both{' '}
+                    <code>modal-steps</code> and <code>page-steps</code>; creating still
+                    submits once at the end, because a record that does not exist yet has
+                    nothing to PATCH against. Set <code>perStepSave: false</code> on the
+                    form to keep the old single-submit behaviour.
+                  </li>
+                </ul>
+              </div>
+            </div>
+
             {/* v3.112.0 */}
             <div className="mb-12">
               <div className="flex items-center gap-3 mb-4">
